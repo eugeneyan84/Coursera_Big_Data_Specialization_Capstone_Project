@@ -1,0 +1,129 @@
+// Constraint Creation
+
+CREATE CONSTRAINT ON (u:User) ASSERT u.id IS UNIQUE;
+CREATE CONSTRAINT ON (t:Team) ASSERT t.id IS UNIQUE;
+
+CREATE CONSTRAINT ON (c:TeamChatSession) ASSERT c.id IS UNIQUE;
+
+CREATE CONSTRAINT ON (i:ChatItem) ASSERT i.id IS UNIQUE;
+
+
+// view existing constraints and indexes
+
+:schema
+
+
+//Data Loading & Graph Construction
+
+LOAD CSV FROM "file:/chat_create_team_chat.csv" AS row
+MERGE (u:User {id: toInt(row[0])})
+MERGE (t:Team {id: toInt(row[1])})
+MERGE (c:TeamChatSession {id: toInt(row[2])})
+MERGE (u)-[:CreatesSession{timeStamp: row[3]}]->(c)
+MERGE (c)-[:OwnedBy{timeStamp: row[3]}]->(t)
+
+LOAD CSV FROM "file:/chat_join_team_chat.csv" AS row
+MERGE (u:User {id: toInt(row[0])})
+MERGE (c:TeamChatSession {id: toInt(row[1])})
+MERGE (u)-[:Join{timeStamp: row[2]}]->(c)
+
+LOAD CSV FROM "file:/chat_leave_team_chat.csv" AS row
+MERGE (u:User {id: toInt(row[0])})
+MERGE (c:TeamChatSession {id: toInt(row[1])})
+MERGE (u)-[:Leaves{timeStamp: row[2]}]->(c)
+
+LOAD CSV FROM "file:/chat_item_team_chat.csv" AS row
+MERGE (u:User {id: toInt(row[0])})
+MERGE (c:TeamChatSession {id: toInt(row[1])})
+MERGE (ci:ChatItem {id: toInt(row[2])})
+MERGE (u)-[:CreateChat {timeStamp: row[3]}]->(ci)
+MERGE (ci)-[:PartOf{timeStamp: row[3]}]->(c)
+
+LOAD CSV FROM "file:/chat_mention_team_chat.csv" AS row
+MERGE (ci:ChatItem {id: toInt(row[0])})
+MERGE (u:User {id: toInt(row[1])})
+MERGE (ci)-[:Mentioned{timeStamp: row[2]}]->(u)
+
+LOAD CSV FROM "file:/chat_respond_team_chat.csv" AS row
+MERGE (ci1:ChatItem {id: toInt(row[0])})
+MERGE (ci2:ChatItem {id: toInt(row[1])})
+MERGE (ci1)-[:ResponseTo{timeStamp: row[2]}]->(ci2)
+
+
+// Verification by Counting Nodes (count=45463)
+
+start n=node(*)
+match (n)
+return count(n)
+
+
+// Verification by Counting Edges (count=118502)
+
+MATCH ()-[r]->()
+return count(*);
+
+
+// Find Longest Conversation Chain
+match p=(a)-[:ResponseTo*]->(b)
+RETURN p, length(p)
+ORDER BY length(p) desc limit 1
+
+
+// Find All Users Involved In Longest Conversation Chain
+
+match p=(a)-[:ResponseTo*]->(b)
+where length(p) = 9
+with p
+match (u:User)-[]-(d)
+where d in nodes(p)
+return u // distinct(u) also yields same result
+
+
+// Find Top 10 Chattiest Users
+
+MATCH (u:User)-[r:CreateChat]->(ci:ChatItem)
+RETURN u.id as node, count(r) as Outdegree
+ORDER BY Outdegree desc LIMIT 10
+
+
+// Find Top 10 Chattiest Teams
+
+MATCH (ci:ChatItem)-[po:PartOf]->(tcs:TeamChatSession)-[o:OwnedBy]->(t:Team)
+RETURN t.id as team, count(po) as Outdegree
+ORDER BY Outdegree DESC LIMIT 10
+
+
+// Trace Teams of Top 10 Chattiest Users
+
+MATCH (u:User)-[r:CreateChat]->(ci:ChatItem)-[po:PartOf]->(tcs:TeamChatSession)-[o:OwnedBy]->(t:Team)
+RETURN u.id as node, count(r) as Outdegree, t.id as team
+ORDER BY Outdegree desc LIMIT 10
+
+
+// Creation of Interaction Edges For Users Who Mention Others
+
+MATCH (u1:User)-[cc:CreateChat]->(ci:ChatItem)-[m:Mentioned]->(u2:User)
+WHERE u1.id <> u2.id
+MERGE (u1)-[:InteractsWith]->(u2)
+
+
+// Creation of Interaction Edges For Users Who Respond To ChatItem Of Others
+
+MATCH (u1:User)-[cc1:CreateChat]->(ci1:ChatItem)-[rt:ResponseTo]->(ci2:ChatItem)<-[cc2:CreateChat]-(u2:User)
+WHERE u1.id <> u2.id
+MERGE (u1)-[:InteractsWith]->(u2)
+
+
+// Delete duplicate interaction edges (optional)
+
+Match (u1)-[r:InteractsWith]->(u1) delete r
+
+
+// Sample Query For Calculating Cluster Coefficient For A Targeted User
+
+match (u1:User { id: 394 })-[iw1:InteractsWith]->(u2:User)
+with collect(u2.id) as neighbours, count(u2) as k
+match (u3:User)-[iw2:InteractsWith]->(u4:User)
+where (u3.id in (neighbours)) and (u4.id in (neighbours)) and (u3.id <> u4.id)
+with count(iw2) as numerator, (k * (k - 1) * 1.0) as denominator
+return numerator/denominator as clusterCoefficient
